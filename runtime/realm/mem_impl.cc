@@ -33,6 +33,13 @@ static const void *ignore_gasnet_warning1 __attribute__((unused)) = (void *)_gas
 #ifdef _INCLUDED_GASNET_TOOLS_H
 static const void *ignore_gasnet_warning2 __attribute__((unused)) = (void *)_gasnett_trace_printf_noop;
 #endif
+#elif defined USE_MPI
+#include <mpi.h>
+#include "realm/am_mpi.h"
+
+extern void *g_am_base;
+extern void **g_am_bases;
+extern MPI_Win g_am_win;
 #endif
 
 #define CHECK_GASNET(cmd) do { \
@@ -590,12 +597,15 @@ namespace Realm {
     void RemoteMemory::get_bytes(off_t offset, void *dst, size_t size)
     {
       // this better be an RDMA-able memory
-#ifdef USE_GASNET
       assert(kind == MemoryImpl::MKIND_RDMA);
+#ifdef USE_GASNET
       void *srcptr = ((char *)regbase) + offset;
       gasnet_get(dst, ID(me).memory.owner_node, srcptr, size);
 #else
-      assert(0 && "no remote get_bytes without GASNET");
+        void *srcptr = ((char *)regbase) + offset - (size_t) g_am_base;
+        MPI_Win_lock(MPI_LOCK_SHARED, ID(me).memory.owner_node, 0, g_am_win);
+        MPI_Get(dst, size, MPI_BYTE, ID(me).memory.owner_node, (MPI_Aint) srcptr, size, MPI_BYTE, g_am_win);
+        MPI_Win_unlock(ID(me).memory.owner_node, g_am_win);
 #endif
     }
 
@@ -630,6 +640,10 @@ namespace Realm {
 	segbases[i] = (char *)(seginfos[i].addr);
       }
       delete[] seginfos;
+#elif defined USE_MPI
+    for (int  i = 0; i<num_nodes; i++) {
+        segbases[i] = (char *) g_am_bases[i];
+    }
 #else
       for(int i = 0; i < num_nodes; i++) {
 	segbases[i] = (char *)(malloc(size_per_node));
@@ -676,11 +690,20 @@ namespace Realm {
 	off_t blkoffset = offset % memory_stride;
 	size_t chunk_size = memory_stride - blkoffset;
 	if(chunk_size > size) chunk_size = size;
+        if(node!=my_node_id){
 #ifdef USE_GASNET
 	gasnet_get(dst_c, node, segbases[node]+(blkid * memory_stride)+blkoffset, chunk_size);
+#elif defined USE_MPI
+        MPI_Win_lock(MPI_LOCK_SHARED, node, 0, g_am_win);
+        MPI_Get(dst_c, chunk_size, MPI_BYTE, node, (MPI_Aint) (blkid * memory_stride + blkoffset), chunk_size, MPI_BYTE, g_am_win);
+        MPI_Win_unlock(node, g_am_win);
 #else
-	memcpy(dst_c, segbases[node]+(blkid * memory_stride)+blkoffset, chunk_size);
+        assert(0);
 #endif
+        }
+        else {
+            memcpy(dst_c, segbases[node]+(blkid * memory_stride)+blkoffset, chunk_size);
+        }
 	offset += chunk_size;
 	dst_c += chunk_size;
 	size -= chunk_size;
@@ -696,11 +719,20 @@ namespace Realm {
 	off_t blkoffset = offset % memory_stride;
 	size_t chunk_size = memory_stride - blkoffset;
 	if(chunk_size > size) chunk_size = size;
+        if(node!=my_node_id){
 #ifdef USE_GASNET
 	gasnet_put(node, segbases[node]+(blkid * memory_stride)+blkoffset, src_c, chunk_size);
+#elif defined USE_MPI
+        MPI_Win_lock(MPI_LOCK_SHARED, node, 0, g_am_win);
+        MPI_Put(src_c, chunk_size, MPI_BYTE, node, (MPI_Aint) (blkid * memory_stride + blkoffset), chunk_size, MPI_BYTE, g_am_win);
+        MPI_Win_unlock(node, g_am_win);
 #else
-	memcpy(segbases[node]+(blkid * memory_stride)+blkoffset, src_c, chunk_size);
+        assert(0);
 #endif
+        }
+        else{
+            memcpy(segbases[node]+(blkid * memory_stride)+blkoffset, src_c, chunk_size);
+        }
 	offset += chunk_size;
 	src_c += chunk_size;
 	size -= chunk_size;
@@ -754,6 +786,8 @@ namespace Realm {
 #ifdef USE_NBI_ACCESSREGION
       gasnet_begin_nbi_accessregion();
 #endif
+#elif defined USE_MPI
+    MPI_Win_lock_all(0, g_am_win);
 #endif
       DetailedTimer::push_timer(10);
       for(size_t i = 0; i < batch_size; i++) {
@@ -771,11 +805,15 @@ namespace Realm {
 
 	  char *src_c = (segbases[node] +
 			 (blkid * memory_stride) + blkoffset);
-#ifdef USE_GASNET
 	  if(node != my_node_id) {
+#ifdef USE_GASNET
 	    gasnet_get_nbi(dst_c, node, src_c, chunk_size);
-	  } else
+#elif defined USE_MPI
+    MPI_Get(dst_c, chunk_size, MPI_BYTE, node, (MPI_Aint) (blkid * memory_stride + blkoffset), chunk_size, MPI_BYTE, g_am_win);
+#else
+            assert(0);
 #endif
+	  } else
 	  {
 	    memcpy(dst_c, src_c, chunk_size);
 	  }
@@ -803,6 +841,8 @@ namespace Realm {
       gasnet_wait_syncnbi_gets();
       DetailedTimer::pop_timer();
 #endif
+#elif defined USE_MPI
+    MPI_Win_unlock_all(g_am_win);
 #endif
     }
 
@@ -813,6 +853,8 @@ namespace Realm {
     {
 #ifdef USE_GASNET
       gasnet_begin_nbi_accessregion();
+#elif defined USE_MPI
+    MPI_Win_lock_all(0, g_am_win);
 #endif
 
       DetailedTimer::push_timer(14);
@@ -831,11 +873,15 @@ namespace Realm {
 
 	  char *dst_c = (segbases[node] +
 			 (blkid * memory_stride) + blkoffset);
-#ifdef USE_GASNET
 	  if(node != my_node_id) {
+#ifdef USE_GASNET
 	    gasnet_put_nbi(node, dst_c, (void *)src_c, chunk_size);
-	  } else
+#elif defined USE_MPI
+    MPI_Put(src_c, chunk_size, MPI_BYTE, node, (MPI_Aint) (blkid * memory_stride + blkoffset), chunk_size, MPI_BYTE, g_am_win);
+#else
+            assert(0);
 #endif
+	  } else
 	  {
 	    memcpy(dst_c, src_c, chunk_size);
 	  }
@@ -857,6 +903,8 @@ namespace Realm {
       DetailedTimer::push_timer(16);
       gasnet_wait_syncnb(handle);
       DetailedTimer::pop_timer();
+#elif defined USE_MPI
+    MPI_Win_unlock_all(g_am_win);
 #endif
     }
 

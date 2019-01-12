@@ -45,9 +45,14 @@ static const void *ignore_gasnet_warning1 __attribute__((unused)) = (void *)_gas
 #ifdef _INCLUDED_GASNET_TOOLS_H
 static const void *ignore_gasnet_warning2 __attribute__((unused)) = (void *)_gasnett_trace_printf_noop;
 #endif
-#endif
 
-#ifndef USE_GASNET
+#elif defined USE_MPI
+#include <mpi.h>
+#include "realm/am_mpi.h"
+
+extern void *g_am_base;
+
+#else
 /*extern*/ void *fake_gasnet_mem_base = 0;
 /*extern*/ size_t fake_gasnet_mem_size = 0;
 #endif
@@ -1069,6 +1074,7 @@ namespace Realm {
       CHECK_GASNET( gasnet_init(argc, argv) );
       my_node_id = gasnet_mynode();
       max_node_id = gasnet_nodes() - 1;
+      // printf("[gasnet_init: %d/%d]\n", my_node_id, max_node_id);
 #ifdef DEBUG_REALM_STARTUP
       { // once we're convinced there isn't skew here, reduce this to rank 0
         char s[80];
@@ -1078,6 +1084,10 @@ namespace Realm {
         fflush(stdout);
       }
 #endif
+#elif defined USE_MPI
+    int node_size;
+    AM_Init(&my_node_id, &node_size);
+    max_node_id = node_size - 1;
 #endif
 
       // TODO: this is here to match old behavior, but it'd probably be
@@ -1163,6 +1173,9 @@ namespace Realm {
 #ifdef USE_GASNET
       size_t gasnet_mem_size_in_mb = 256;
       size_t reg_ib_mem_size_in_mb = 256;
+#elif defined USE_MPI
+        size_t gasnet_mem_size_in_mb = 256;
+        size_t reg_ib_mem_size_in_mb = 256;
 #else
       size_t gasnet_mem_size_in_mb = 0;
       size_t reg_ib_mem_size_in_mb = 64; // for transposes/serdez
@@ -1479,6 +1492,8 @@ namespace Realm {
 	CHECK_GASNET( gasnet_getSegmentInfo(seginfos, max_node_id + 1) );
 	char *regmem_base = ((char *)(seginfos[my_node_id].addr)) + (gasnet_mem_size_in_mb << 20);
 	delete[] seginfos;
+#elif defined USE_MPI
+    char *regmem_base = (char *)g_am_base + (gasnet_mem_size_in_mb << 20);
 #else
 	nongasnet_regmem_base = malloc(reg_mem_size_in_mb << 20);
 	assert(nongasnet_regmem_base != 0);
@@ -1508,6 +1523,8 @@ namespace Realm {
 	char *reg_ib_mem_base = ((char *)(seginfos[my_node_id].addr)) + (gasnet_mem_size_in_mb << 20)
                                 + (reg_mem_size_in_mb << 20);
 	delete[] seginfos;
+#elif defined USE_MPI
+    char *reg_ib_mem_base = (char *)g_am_base + (gasnet_mem_size_in_mb << 20) + (reg_mem_size_in_mb << 20);
 #else
 	nongasnet_reg_ib_mem_base = malloc(reg_ib_mem_size_in_mb << 20);
 	assert(nongasnet_reg_ib_mem_base != 0);
@@ -1949,6 +1966,40 @@ namespace Realm {
 
 	return finish_event;
       }
+#elif defined USE_MPI
+    int root = ID(target_proc).proc.owner_node;
+    Event *all_events = 0;
+    if ((int) my_node_id == root) {
+        // step 1: receive wait_on from every node
+        all_events = new Event[max_node_id + 1];
+        MPI_Gather(&wait_on, sizeof(Event), MPI_BYTE, all_events, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        // step 2: merge all the events
+        std::set<Event> event_set;
+        for(NodeID i = 0; i <= max_node_id; i++) {
+            //log_collective.info() << "ev " << i << ": " << all_events[i];
+            if(all_events[i].exists())
+            event_set.insert(all_events[i]);
+        }
+        delete[] all_events;
+        Event merged_event = Event::merge_events(event_set);
+        log_collective.info() << "merged precondition: proc=" << target_proc << " func=" << task_id << " priority=" << priority << " before=" << merged_event;
+        // step 3: run the task
+        Event finish_event = target_proc.spawn(task_id, args, arglen, merged_event, priority);
+        // step 4: broadcast the finish event to everyone
+        MPI_Bcast(&finish_event, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        log_collective.info() << "collective spawn: proc=" << target_proc << " func=" << task_id << " priority=" << priority << " after=" << finish_event;
+        return finish_event;
+    } else {
+        // NON-ROOT NODE
+        // step 1: send our wait_on to the root for merging
+        MPI_Gather(&wait_on, sizeof(Event), MPI_BYTE, all_events, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        // steps 2 and 3: twiddle thumbs
+        // step 4: receive finish event
+        Event finish_event;
+        MPI_Bcast(&finish_event, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        log_collective.info() << "collective spawn: proc=" << target_proc << " func=" << task_id << " priority=" << priority << " after=" << finish_event;
+        return finish_event;
+    }
 #else
       // no GASNet, so a collective spawn is the same as a regular spawn
       Event finish_event = target_proc.spawn(task_id, args, arglen, wait_on, priority);
@@ -2010,6 +2061,32 @@ namespace Realm {
 	// step 3: receive merged wait_on event
 	gasnet_coll_broadcast(GASNET_TEAM_ALL, &merged_event, 0, 0, sizeof(Event), GASNET_COLL_FLAGS);
       }
+#elif defined USE_MPI
+    Event *all_events = 0;
+    Event merged_event;
+    int root = 0;
+    if (my_node_id == root) {
+        // step 1: receive wait_on from every node
+        all_events = new Event[max_node_id + 1];
+        MPI_Gather(&wait_on, sizeof(Event), MPI_BYTE, all_events, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        // step 2: merge all the events
+        std::set<Event> event_set;
+        for(NodeID i = 0; i <= max_node_id; i++) {
+            //log_collective.info() << "ev " << i << ": " << all_events[i];
+            if(all_events[i].exists())
+            event_set.insert(all_events[i]);
+        }
+        delete[] all_events;
+        merged_event = Event::merge_events(event_set);
+        // step 3: broadcast the merged event back to everyone
+        MPI_Bcast(&merged_event, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+    } else {
+        // step 1: send our wait_on to the root for merging
+        MPI_Gather(&wait_on, sizeof(Event), MPI_BYTE, all_events, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        // step 2: twiddle thumbs
+        // step 3: receive merged wait_on event
+        MPI_Bcast(&merged_event, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+    }
 #else
       // no GASNet, so our precondition is the only one
       Event merged_event = wait_on;
@@ -2079,6 +2156,34 @@ namespace Realm {
 
 	return merged_finish;
       }
+#elif defined USE_MPI
+    if (my_node_id == root) {
+        // step 1: receive wait_on from every node
+        all_events = new Event[max_node_id + 1];
+        MPI_Gather(&my_finish, sizeof(Event), MPI_BYTE, all_events, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        // step 2: merge all the events
+        std::set<Event> event_set;
+        for(NodeID i = 0; i <= max_node_id; i++) {
+            //log_collective.info() << "ev " << i << ": " << all_events[i];
+            if(all_events[i].exists())
+            event_set.insert(all_events[i]);
+        }
+        delete[] all_events;
+        Event merged_finish = Event::merge_events(event_set);
+        // step 3: broadcast the merged event back to everyone
+        MPI_Bcast(&merged_finish, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        log_collective.info() << "collective spawn: kind=" << target_kind << " func=" << task_id << " priority=" << priority << " after=" << merged_finish;
+        return merged_finish;
+    } else {
+        // step 1: send our wait_on to the root for merging
+        MPI_Gather(&my_finish, sizeof(Event), MPI_BYTE, all_events, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        // step 2: twiddle thumbs
+        // step 3: receive merged wait_on event
+        Event merged_finish;
+        MPI_Bcast(&merged_finish, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        log_collective.info() << "collective spawn: kind=" << target_kind << " func=" << task_id << " priority=" << priority << " after=" << merged_finish;
+        return merged_finish;
+    }
 #else
       // no GASNet, so just return our locally merged event
       log_collective.info() << "collective spawn: kind=" << target_kind << " func=" << task_id << " priority=" << priority << " after=" << my_finish;
@@ -2244,6 +2349,8 @@ namespace Realm {
       // don't start tearing things down until all processes agree
       gasnet_barrier_notify(0, GASNET_BARRIERFLAG_ANONYMOUS);
       gasnet_barrier_wait(0, GASNET_BARRIERFLAG_ANONYMOUS);
+#elif defined USE_MPI
+    MPI_Barrier(MPI_COMM_WORLD);
 #endif
 
       // Shutdown all the threads
@@ -2364,6 +2471,7 @@ namespace Realm {
     GenEventImpl *RuntimeImpl::get_genevent_impl(Event e)
     {
       ID id(e);
+      // $call to_debug
       assert(id.is_event());
 
       Node *n = &nodes[id.event.creator_node];
