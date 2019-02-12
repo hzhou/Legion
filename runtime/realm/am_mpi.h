@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <assert.h>
+#include <thread>
 #include <atomic>
 
 typedef void (*AM_HANDLER_T)();

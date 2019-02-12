@@ -75,7 +75,7 @@ void enqueue_message(NodeID target, int msgid,
         if (!dstptr) {
             AM_medium_n(n_args, target, msgid, payload, payload_size, (const int *) args);
         } else {
-            dstptr -= (size_t) g_am_bases[target];
+            dstptr = (char *) dstptr - (size_t) g_am_bases[target];
             AM_long_n(n_args, target, msgid, payload, payload_size, dstptr, (const int *) args);
         }
     }
@@ -105,7 +105,7 @@ void enqueue_message(NodeID target, int msgid,
         if (!dstptr) {
             AM_medium_n(n_args, target, msgid, payload, payload_size, (const int *) args);
         } else {
-            dstptr -= (size_t) g_am_bases[target];
+            dstptr = (char *) dstptr - (size_t) g_am_bases[target];
             AM_long_n(n_args, target, msgid, payload, payload_size, dstptr, (const int *) args);
         }
     }
@@ -135,7 +135,7 @@ void enqueue_message(NodeID target, int msgid,
         if (!dstptr) {
             AM_medium_n(n_args, target, msgid, payload, payload_size, (const int *) args);
         } else {
-            dstptr -= (size_t) g_am_bases[target];
+            dstptr = (char *) dstptr - (size_t) g_am_bases[target];
             AM_long_n(n_args, target, msgid, payload, payload_size, dstptr, (const int *) args);
         }
     }

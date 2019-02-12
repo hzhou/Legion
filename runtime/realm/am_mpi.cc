@@ -10,7 +10,8 @@ int node_this;
 AM_HANDLER_T AM_table[256];
 unsigned int buf_recv[20];
 MPI_Request req_recv = MPI_REQUEST_NULL;
-std::atomic_uint msg_seq;
+thread_local int thread_id = 0;
+std::atomic_uint num_threads;
 extern int my_node_id;
 
 void AM_Init(int *p_node_this, int *p_node_size)
@@ -183,6 +184,7 @@ void AMPoll()
                     fprintf(stderr, "AM_MEDIUM: too many args\n");
                     exit(-1);
                 }
+                free(s);
             } else {
                 buf_recv[0] -= 0x200;
                 len = buf_recv[2];
@@ -275,8 +277,11 @@ void AM_medium_n(int n, int tgt, int handler, const void *msg, int len, const in
     buf_send[1] = handler;
     buf_send[2] = len;
     int msg_tag = 0x0;
-    msg_seq++;
-    msg_tag = msg_seq << 1;
+    if (thread_id == 0) {
+        num_threads++;
+        thread_id = num_threads;
+    }
+    msg_tag = thread_id << 1;
     buf_send[3] = msg_tag;
     for (int  i = 0; i<n; i++) {
         buf_send[4+i] = args[i];
