@@ -17,6 +17,10 @@ extern int my_node_id;
 
 void AM_Init(int *p_node_this, int *p_node_size)
 {
+    int tn_ret;
+
+    tn_ret = pthread_mutex_init(&am_mutex, NULL);
+    assert(tn_ret == 0);
     int mpi_thread_model;
     MPI_Init_thread(NULL, NULL, MPI_THREAD_SERIALIZED, &mpi_thread_model);
     assert(mpi_thread_model == MPI_THREAD_SERIALIZED);
@@ -34,29 +38,46 @@ void AM_Init_segments(size_t size)
     assert(g_am_win_size != 0);
     g_am_base = malloc(g_am_win_size);
     assert(g_am_base != NULL);
+    pthread_mutex_lock(&am_mutex);
     ret = MPI_Win_create(g_am_base, g_am_win_size, 1, MPI_INFO_NULL, MPI_COMM_WORLD, &g_am_win);
     if (ret != MPI_SUCCESS) {
         fprintf(stderr, "MPI error in [$(@args)]\n");
         exit(-1);
     }
+    pthread_mutex_unlock(&am_mutex);
     g_am_bases = (void **) malloc(node_size * sizeof(void*));
+    pthread_mutex_lock(&am_mutex);
     ret = MPI_Allgather(&g_am_base, 8, MPI_BYTE, g_am_bases, 8, MPI_BYTE, MPI_COMM_WORLD);
     if (ret != MPI_SUCCESS) {
         fprintf(stderr, "MPI error in [$(@args)]\n");
         exit(-1);
     }
+    pthread_mutex_unlock(&am_mutex);
 }
 
 void AM_Finalize()
 {
     MPI_Request req_final;
     int ret;
+    int tn_ret;
 
-    MPI_Ibarrier(MPI_COMM_WORLD, &req_final);
+    pthread_mutex_lock(&am_mutex);
+    ret = MPI_Ibarrier(MPI_COMM_WORLD, &req_final);
+    if (ret != MPI_SUCCESS) {
+        fprintf(stderr, "MPI error in [$(@args)]\n");
+        exit(-1);
+    }
+    pthread_mutex_unlock(&am_mutex);
     while (1) {
         int is_done;
         MPI_Status status;
-        MPI_Test(&req_final, &is_done, &status);
+        pthread_mutex_lock(&am_mutex);
+        ret = MPI_Test(&req_final, &is_done, &status);
+        if (ret != MPI_SUCCESS) {
+            fprintf(stderr, "MPI error in [$(@args)]\n");
+            exit(-1);
+        }
+        pthread_mutex_unlock(&am_mutex);
         if (req_final == MPI_REQUEST_NULL) {
             break;
         }
@@ -64,14 +85,18 @@ void AM_Finalize()
     }
     AMPoll_cancel();
     if (g_am_base) {
+        pthread_mutex_lock(&am_mutex);
         ret = MPI_Win_free(&g_am_win);
         if (ret != MPI_SUCCESS) {
             fprintf(stderr, "MPI error in [$(@args)]\n");
             exit(-1);
         }
+        pthread_mutex_unlock(&am_mutex);
         free(g_am_base);
     }
     MPI_Finalize();
+    tn_ret = pthread_mutex_destroy(&am_mutex);
+    assert(tn_ret == 0);
 }
 
 void AM_add_handler(int i, AM_HANDLER_T handler)
@@ -87,16 +112,24 @@ void AMPoll()
     int len;
 
     if (req_recv == MPI_REQUEST_NULL) {
+        pthread_mutex_lock(&am_mutex);
         ret = MPI_Irecv(buf_recv, 20, MPI_INT, MPI_ANY_SOURCE, 0x1, MPI_COMM_WORLD, &req_recv);
         if (ret != MPI_SUCCESS) {
             fprintf(stderr, "MPI error in [$(@args)]\n");
             exit(-1);
         }
+        pthread_mutex_unlock(&am_mutex);
     }
     while (1) {
         int got_am;
         MPI_Status status;
-        MPI_Test(&req_recv, &got_am, &status);
+        pthread_mutex_lock(&am_mutex);
+        ret = MPI_Test(&req_recv, &got_am, &status);
+        if (ret != MPI_SUCCESS) {
+            fprintf(stderr, "MPI error in [$(@args)]\n");
+            exit(-1);
+        }
+        pthread_mutex_unlock(&am_mutex);
         if (!got_am) {
             break;
         } else {
@@ -143,11 +176,13 @@ void AMPoll()
                 int msg_tag = buf_recv[3];
                 s = (char *) malloc(len);
                 if (len > 0) {
+                    pthread_mutex_lock(&am_mutex);
                     ret = MPI_Recv(s, len, MPI_BYTE, status.MPI_SOURCE, msg_tag, MPI_COMM_WORLD, &status);
                     if (ret != MPI_SUCCESS) {
                         fprintf(stderr, "MPI error in [$(@args)]\n");
                         exit(-1);
                     }
+                    pthread_mutex_unlock(&am_mutex);
                 }
                 if (buf_recv[0] == 1) {
                     ((AM_MEDIUM_1) AM_table[buf_recv[1]]) (status.MPI_SOURCE, s, len, buf_recv[4]);
@@ -228,11 +263,13 @@ void AMPoll()
                 }
             }
             if (req_recv == MPI_REQUEST_NULL) {
+                pthread_mutex_lock(&am_mutex);
                 ret = MPI_Irecv(buf_recv, 20, MPI_INT, MPI_ANY_SOURCE, 0x1, MPI_COMM_WORLD, &req_recv);
                 if (ret != MPI_SUCCESS) {
                     fprintf(stderr, "MPI error in [$(@args)]\n");
                     exit(-1);
                 }
+                pthread_mutex_unlock(&am_mutex);
             }
         }
     }
@@ -243,11 +280,13 @@ void AMPoll_cancel()
     int ret;
 
     if (req_recv != MPI_REQUEST_NULL) {
+        pthread_mutex_lock(&am_mutex);
         ret = MPI_Cancel(&req_recv);
         if (ret != MPI_SUCCESS) {
             fprintf(stderr, "MPI error in [$(@args)]\n");
             exit(-1);
         }
+        pthread_mutex_unlock(&am_mutex);
     }
 }
 
@@ -256,7 +295,6 @@ void AM_short_n(int n, int tgt, int handler, const int *args)
     int buf_send[20];
     int ret;
 
-    pthread_mutex_lock(&am_mutex);
     if (thread_id == 0) {
         num_threads++;
         thread_id = num_threads;
@@ -267,6 +305,7 @@ void AM_short_n(int n, int tgt, int handler, const int *args)
         buf_send[2+i] = args[i];
     }
     assert(tgt != my_node_id);
+    pthread_mutex_lock(&am_mutex);
     ret = MPI_Send(buf_send, n + 2, MPI_INT, tgt, 0x1, MPI_COMM_WORLD);
     if (ret != MPI_SUCCESS) {
         fprintf(stderr, "MPI error in [$(@args)]\n");

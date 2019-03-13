@@ -1,3 +1,6 @@
+#include <thread>
+
+extern pthread_mutex_t am_mutex;
 /* Copyright 2019 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");

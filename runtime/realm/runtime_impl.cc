@@ -47,9 +47,11 @@ static const void *ignore_gasnet_warning2 __attribute__((unused)) = (void *)_gas
 #endif
 
 #elif defined USE_MPI
+#include <thread>
 #include <mpi.h>
 #include "realm/am_mpi.h"
 
+extern pthread_mutex_t am_mutex;
 extern void *g_am_base;
 
 #else
@@ -1972,7 +1974,9 @@ namespace Realm {
     if ((int) my_node_id == root) {
         // step 1: receive wait_on from every node
         all_events = new Event[max_node_id + 1];
+        pthread_mutex_lock(&am_mutex);
         MPI_Gather(&wait_on, sizeof(Event), MPI_BYTE, all_events, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        pthread_mutex_unlock(&am_mutex);
         // step 2: merge all the events
         std::set<Event> event_set;
         for(NodeID i = 0; i <= max_node_id; i++) {
@@ -1986,17 +1990,23 @@ namespace Realm {
         // step 3: run the task
         Event finish_event = target_proc.spawn(task_id, args, arglen, merged_event, priority);
         // step 4: broadcast the finish event to everyone
+        pthread_mutex_lock(&am_mutex);
         MPI_Bcast(&finish_event, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        pthread_mutex_unlock(&am_mutex);
         log_collective.info() << "collective spawn: proc=" << target_proc << " func=" << task_id << " priority=" << priority << " after=" << finish_event;
         return finish_event;
     } else {
         // NON-ROOT NODE
         // step 1: send our wait_on to the root for merging
+        pthread_mutex_lock(&am_mutex);
         MPI_Gather(&wait_on, sizeof(Event), MPI_BYTE, all_events, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        pthread_mutex_unlock(&am_mutex);
         // steps 2 and 3: twiddle thumbs
         // step 4: receive finish event
         Event finish_event;
+        pthread_mutex_lock(&am_mutex);
         MPI_Bcast(&finish_event, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        pthread_mutex_unlock(&am_mutex);
         log_collective.info() << "collective spawn: proc=" << target_proc << " func=" << task_id << " priority=" << priority << " after=" << finish_event;
         return finish_event;
     }
@@ -2068,7 +2078,9 @@ namespace Realm {
     if (my_node_id == root) {
         // step 1: receive wait_on from every node
         all_events = new Event[max_node_id + 1];
+        pthread_mutex_lock(&am_mutex);
         MPI_Gather(&wait_on, sizeof(Event), MPI_BYTE, all_events, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        pthread_mutex_unlock(&am_mutex);
         // step 2: merge all the events
         std::set<Event> event_set;
         for(NodeID i = 0; i <= max_node_id; i++) {
@@ -2079,13 +2091,19 @@ namespace Realm {
         delete[] all_events;
         merged_event = Event::merge_events(event_set);
         // step 3: broadcast the merged event back to everyone
+        pthread_mutex_lock(&am_mutex);
         MPI_Bcast(&merged_event, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        pthread_mutex_unlock(&am_mutex);
     } else {
         // step 1: send our wait_on to the root for merging
+        pthread_mutex_lock(&am_mutex);
         MPI_Gather(&wait_on, sizeof(Event), MPI_BYTE, all_events, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        pthread_mutex_unlock(&am_mutex);
         // step 2: twiddle thumbs
         // step 3: receive merged wait_on event
+        pthread_mutex_lock(&am_mutex);
         MPI_Bcast(&merged_event, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        pthread_mutex_unlock(&am_mutex);
     }
 #else
       // no GASNet, so our precondition is the only one
@@ -2160,7 +2178,9 @@ namespace Realm {
     if (my_node_id == root) {
         // step 1: receive wait_on from every node
         all_events = new Event[max_node_id + 1];
+        pthread_mutex_lock(&am_mutex);
         MPI_Gather(&my_finish, sizeof(Event), MPI_BYTE, all_events, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        pthread_mutex_unlock(&am_mutex);
         // step 2: merge all the events
         std::set<Event> event_set;
         for(NodeID i = 0; i <= max_node_id; i++) {
@@ -2171,16 +2191,22 @@ namespace Realm {
         delete[] all_events;
         Event merged_finish = Event::merge_events(event_set);
         // step 3: broadcast the merged event back to everyone
+        pthread_mutex_lock(&am_mutex);
         MPI_Bcast(&merged_finish, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        pthread_mutex_unlock(&am_mutex);
         log_collective.info() << "collective spawn: kind=" << target_kind << " func=" << task_id << " priority=" << priority << " after=" << merged_finish;
         return merged_finish;
     } else {
         // step 1: send our wait_on to the root for merging
+        pthread_mutex_lock(&am_mutex);
         MPI_Gather(&my_finish, sizeof(Event), MPI_BYTE, all_events, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        pthread_mutex_unlock(&am_mutex);
         // step 2: twiddle thumbs
         // step 3: receive merged wait_on event
         Event merged_finish;
+        pthread_mutex_lock(&am_mutex);
         MPI_Bcast(&merged_finish, sizeof(Event), MPI_BYTE, root, MPI_COMM_WORLD);
+        pthread_mutex_unlock(&am_mutex);
         log_collective.info() << "collective spawn: kind=" << target_kind << " func=" << task_id << " priority=" << priority << " after=" << merged_finish;
         return merged_finish;
     }
@@ -2350,7 +2376,9 @@ namespace Realm {
       gasnet_barrier_notify(0, GASNET_BARRIERFLAG_ANONYMOUS);
       gasnet_barrier_wait(0, GASNET_BARRIERFLAG_ANONYMOUS);
 #elif defined USE_MPI
+    pthread_mutex_lock(&am_mutex);
     MPI_Barrier(MPI_COMM_WORLD);
+    pthread_mutex_unlock(&am_mutex);
 #endif
 
       // Shutdown all the threads

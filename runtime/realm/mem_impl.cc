@@ -34,9 +34,11 @@ static const void *ignore_gasnet_warning1 __attribute__((unused)) = (void *)_gas
 static const void *ignore_gasnet_warning2 __attribute__((unused)) = (void *)_gasnett_trace_printf_noop;
 #endif
 #elif defined USE_MPI
+#include <thread>
 #include <mpi.h>
 #include "realm/am_mpi.h"
 
+extern pthread_mutex_t am_mutex;
 extern void *g_am_base;
 extern void **g_am_bases;
 extern MPI_Win g_am_win;
@@ -603,9 +605,15 @@ namespace Realm {
       gasnet_get(dst, ID(me).memory.owner_node, srcptr, size);
 #else
         void *srcptr = ((char *)regbase) + offset - (size_t) g_am_base;
+        pthread_mutex_lock(&am_mutex);
         MPI_Win_lock(MPI_LOCK_SHARED, ID(me).memory.owner_node, 0, g_am_win);
+        pthread_mutex_unlock(&am_mutex);
+        pthread_mutex_lock(&am_mutex);
         MPI_Get(dst, size, MPI_BYTE, ID(me).memory.owner_node, (MPI_Aint) srcptr, size, MPI_BYTE, g_am_win);
+        pthread_mutex_unlock(&am_mutex);
+        pthread_mutex_lock(&am_mutex);
         MPI_Win_unlock(ID(me).memory.owner_node, g_am_win);
+        pthread_mutex_unlock(&am_mutex);
 #endif
     }
 
@@ -694,9 +702,15 @@ namespace Realm {
 #ifdef USE_GASNET
 	gasnet_get(dst_c, node, segbases[node]+(blkid * memory_stride)+blkoffset, chunk_size);
 #elif defined USE_MPI
+        pthread_mutex_lock(&am_mutex);
         MPI_Win_lock(MPI_LOCK_SHARED, node, 0, g_am_win);
+        pthread_mutex_unlock(&am_mutex);
+        pthread_mutex_lock(&am_mutex);
         MPI_Get(dst_c, chunk_size, MPI_BYTE, node, (MPI_Aint) (blkid * memory_stride + blkoffset), chunk_size, MPI_BYTE, g_am_win);
+        pthread_mutex_unlock(&am_mutex);
+        pthread_mutex_lock(&am_mutex);
         MPI_Win_unlock(node, g_am_win);
+        pthread_mutex_unlock(&am_mutex);
 #else
         assert(0);
 #endif
@@ -723,9 +737,15 @@ namespace Realm {
 #ifdef USE_GASNET
 	gasnet_put(node, segbases[node]+(blkid * memory_stride)+blkoffset, src_c, chunk_size);
 #elif defined USE_MPI
+        pthread_mutex_lock(&am_mutex);
         MPI_Win_lock(MPI_LOCK_SHARED, node, 0, g_am_win);
+        pthread_mutex_unlock(&am_mutex);
+        pthread_mutex_lock(&am_mutex);
         MPI_Put(src_c, chunk_size, MPI_BYTE, node, (MPI_Aint) (blkid * memory_stride + blkoffset), chunk_size, MPI_BYTE, g_am_win);
+        pthread_mutex_unlock(&am_mutex);
+        pthread_mutex_lock(&am_mutex);
         MPI_Win_unlock(node, g_am_win);
+        pthread_mutex_unlock(&am_mutex);
 #else
         assert(0);
 #endif
@@ -787,7 +807,9 @@ namespace Realm {
       gasnet_begin_nbi_accessregion();
 #endif
 #elif defined USE_MPI
+    pthread_mutex_lock(&am_mutex);
     MPI_Win_lock_all(0, g_am_win);
+    pthread_mutex_unlock(&am_mutex);
 #endif
       DetailedTimer::push_timer(10);
       for(size_t i = 0; i < batch_size; i++) {
@@ -809,7 +831,9 @@ namespace Realm {
 #ifdef USE_GASNET
 	    gasnet_get_nbi(dst_c, node, src_c, chunk_size);
 #elif defined USE_MPI
+    pthread_mutex_lock(&am_mutex);
     MPI_Get(dst_c, chunk_size, MPI_BYTE, node, (MPI_Aint) (blkid * memory_stride + blkoffset), chunk_size, MPI_BYTE, g_am_win);
+    pthread_mutex_unlock(&am_mutex);
 #else
             assert(0);
 #endif
@@ -842,7 +866,9 @@ namespace Realm {
       DetailedTimer::pop_timer();
 #endif
 #elif defined USE_MPI
+    pthread_mutex_lock(&am_mutex);
     MPI_Win_unlock_all(g_am_win);
+    pthread_mutex_unlock(&am_mutex);
 #endif
     }
 
@@ -854,7 +880,9 @@ namespace Realm {
 #ifdef USE_GASNET
       gasnet_begin_nbi_accessregion();
 #elif defined USE_MPI
+    pthread_mutex_lock(&am_mutex);
     MPI_Win_lock_all(0, g_am_win);
+    pthread_mutex_unlock(&am_mutex);
 #endif
 
       DetailedTimer::push_timer(14);
@@ -877,7 +905,9 @@ namespace Realm {
 #ifdef USE_GASNET
 	    gasnet_put_nbi(node, dst_c, (void *)src_c, chunk_size);
 #elif defined USE_MPI
+    pthread_mutex_lock(&am_mutex);
     MPI_Put(src_c, chunk_size, MPI_BYTE, node, (MPI_Aint) (blkid * memory_stride + blkoffset), chunk_size, MPI_BYTE, g_am_win);
+    pthread_mutex_unlock(&am_mutex);
 #else
             assert(0);
 #endif
@@ -904,7 +934,9 @@ namespace Realm {
       gasnet_wait_syncnb(handle);
       DetailedTimer::pop_timer();
 #elif defined USE_MPI
+    pthread_mutex_lock(&am_mutex);
     MPI_Win_unlock_all(g_am_win);
+    pthread_mutex_unlock(&am_mutex);
 #endif
     }
 
