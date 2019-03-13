@@ -13,7 +13,6 @@ int node_this;
 AM_HANDLER_T AM_table[256];
 unsigned int buf_recv[20];
 MPI_Request req_recv = MPI_REQUEST_NULL;
-int thread_stat[10];
 extern int my_node_id;
 
 void AM_Init(int *p_node_this, int *p_node_size)
@@ -53,7 +52,6 @@ void AM_Finalize()
     MPI_Request req_final;
     int ret;
 
-    printf("[%d] thread msg stats: 0 %d, 1 %d, 2 %d, 3 %d, 4 %d, 5 %d, 6 %d, 7 %d, 8 %d, 9 %d\n", my_node_id, thread_stat[0], thread_stat[1], thread_stat[2], thread_stat[3], thread_stat[4], thread_stat[5], thread_stat[6], thread_stat[7], thread_stat[8], thread_stat[9]);
     MPI_Ibarrier(MPI_COMM_WORLD, &req_final);
     while (1) {
         int is_done;
@@ -263,9 +261,6 @@ void AM_short_n(int n, int tgt, int handler, const int *args)
         num_threads++;
         thread_id = num_threads;
     }
-    if (thread_id < 10) {
-        thread_stat[thread_id]++;
-    }
     buf_send[0] = n;
     buf_send[1] = handler;
     for (int  i = 0; i<n; i++) {
@@ -289,9 +284,6 @@ void AM_medium_n(int n, int tgt, int handler, const void *msg, int len, const in
     if (thread_id == 0) {
         num_threads++;
         thread_id = num_threads;
-    }
-    if (thread_id < 10) {
-        thread_stat[thread_id]++;
     }
     buf_send[0] = n + 0x100;
     buf_send[1] = handler;
@@ -328,9 +320,6 @@ void AM_long_n(int n, int tgt, int handler, const void *msg, int len, void *dst,
     if (thread_id == 0) {
         num_threads++;
         thread_id = num_threads;
-    }
-    if (thread_id < 10) {
-        thread_stat[thread_id]++;
     }
     ret = MPI_Win_lock(MPI_LOCK_SHARED, tgt, 0, g_am_win);
     if (ret != MPI_SUCCESS) {
