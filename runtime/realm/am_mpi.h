@@ -1,13 +1,13 @@
 #ifndef AM_MPI_H_INCLUDED
 #define AM_MPI_H_INCLUDED
 
+#include <thread>
+#include <atomic>
 #include <mpi.h>
 #include <cstddef>
 #include <cstdlib>
 #include <cstdio>
 #include <assert.h>
-#include <thread>
-#include <atomic>
 
 typedef void (*AM_HANDLER_T)();
 typedef void (*AM_SHORT_1)(int src, int arg_1);

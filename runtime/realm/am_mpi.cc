@@ -1,6 +1,9 @@
 #include "am_mpi.h"
 
 
+thread_local int thread_id = 0;
+std::atomic_uint num_threads;
+pthread_mutex_t am_mutex = PTHREAD_MUTEX_INITIALIZER;
 MPI_Win g_am_win;
 void *g_am_base;
 size_t g_am_win_size;
@@ -10,15 +13,14 @@ int node_this;
 AM_HANDLER_T AM_table[256];
 unsigned int buf_recv[20];
 MPI_Request req_recv = MPI_REQUEST_NULL;
-thread_local int thread_id = 0;
-std::atomic_uint num_threads;
+int thread_stat[10];
 extern int my_node_id;
 
 void AM_Init(int *p_node_this, int *p_node_size)
 {
     int mpi_thread_model;
-    MPI_Init_thread(NULL, NULL, MPI_THREAD_MULTIPLE, &mpi_thread_model);
-    assert(mpi_thread_model == MPI_THREAD_MULTIPLE);
+    MPI_Init_thread(NULL, NULL, MPI_THREAD_SERIALIZED, &mpi_thread_model);
+    assert(mpi_thread_model == MPI_THREAD_SERIALIZED);
     MPI_Comm_size(MPI_COMM_WORLD, &node_size);
     MPI_Comm_rank(MPI_COMM_WORLD, &node_this);
     *p_node_size = node_size;
@@ -51,6 +53,7 @@ void AM_Finalize()
     MPI_Request req_final;
     int ret;
 
+    printf("[%d] thread msg stats: 0 %d, 1 %d, 2 %d, 3 %d, 4 %d, 5 %d, 6 %d, 7 %d, 8 %d, 9 %d\n", my_node_id, thread_stat[0], thread_stat[1], thread_stat[2], thread_stat[3], thread_stat[4], thread_stat[5], thread_stat[6], thread_stat[7], thread_stat[8], thread_stat[9]);
     MPI_Ibarrier(MPI_COMM_WORLD, &req_final);
     while (1) {
         int is_done;
@@ -255,6 +258,14 @@ void AM_short_n(int n, int tgt, int handler, const int *args)
     int buf_send[20];
     int ret;
 
+    pthread_mutex_lock(&am_mutex);
+    if (thread_id == 0) {
+        num_threads++;
+        thread_id = num_threads;
+    }
+    if (thread_id < 10) {
+        thread_stat[thread_id]++;
+    }
     buf_send[0] = n;
     buf_send[1] = handler;
     for (int  i = 0; i<n; i++) {
@@ -266,6 +277,7 @@ void AM_short_n(int n, int tgt, int handler, const int *args)
         fprintf(stderr, "MPI error in [$(@args)]\n");
         exit(-1);
     }
+    pthread_mutex_unlock(&am_mutex);
 }
 
 void AM_medium_n(int n, int tgt, int handler, const void *msg, int len, const int *args)
@@ -273,14 +285,18 @@ void AM_medium_n(int n, int tgt, int handler, const void *msg, int len, const in
     int buf_send[20];
     int ret;
 
-    buf_send[0] = n + 0x100;
-    buf_send[1] = handler;
-    buf_send[2] = len;
-    int msg_tag = 0x0;
+    pthread_mutex_lock(&am_mutex);
     if (thread_id == 0) {
         num_threads++;
         thread_id = num_threads;
     }
+    if (thread_id < 10) {
+        thread_stat[thread_id]++;
+    }
+    buf_send[0] = n + 0x100;
+    buf_send[1] = handler;
+    buf_send[2] = len;
+    int msg_tag = 0x0;
     msg_tag = thread_id << 1;
     buf_send[3] = msg_tag;
     for (int  i = 0; i<n; i++) {
@@ -300,6 +316,7 @@ void AM_medium_n(int n, int tgt, int handler, const void *msg, int len, const in
             exit(-1);
         }
     }
+    pthread_mutex_unlock(&am_mutex);
 }
 
 void AM_long_n(int n, int tgt, int handler, const void *msg, int len, void *dst, const int *args)
@@ -307,6 +324,14 @@ void AM_long_n(int n, int tgt, int handler, const void *msg, int len, void *dst,
     int ret;
     int buf_send[20];
 
+    pthread_mutex_lock(&am_mutex);
+    if (thread_id == 0) {
+        num_threads++;
+        thread_id = num_threads;
+    }
+    if (thread_id < 10) {
+        thread_stat[thread_id]++;
+    }
     ret = MPI_Win_lock(MPI_LOCK_SHARED, tgt, 0, g_am_win);
     if (ret != MPI_SUCCESS) {
         fprintf(stderr, "MPI error in [$(@args)]\n");
@@ -336,4 +361,5 @@ void AM_long_n(int n, int tgt, int handler, const void *msg, int len, void *dst,
         fprintf(stderr, "MPI error in [$(@args)]\n");
         exit(-1);
     }
+    pthread_mutex_unlock(&am_mutex);
 }
